@@ -65,6 +65,7 @@ app/
   parser.py          LL2 응답 → 레코드 변환 (순수 함수)
   store.py           state/ JSON 아카이브 읽기·쓰기
   publish.py         아카이브 → data/ 공개 파일 생성
+  report.py          이번 실행의 변경 사항 → Slack 알림 요약
 state/               내부 원본. 직접 고치지 않아요
   launches.json      전체 발사 아카이브 (지난 발사 포함, 삭제하지 않음)
   sweep.json         피드에서 사라진 발사를 재조회하기 위한 장부
@@ -92,6 +93,24 @@ LL2 무료 API는 IP당 한 시간에 15번까지만 부를 수 있어요. 수�
 - **수동 실행**: GitHub 저장소의 Actions → "Ingest & publish" → Run workflow.
 - **과거 발사 채우기**: 같은 화면의 `backfill_from`에 날짜(`2026-06-01` 형식)를 넣고 실행하면,
   그 날짜 이후에 끝난 발사를 발사사별로 채워요. 발사사당 1~4번을 더 불러요.
+
+## Slack 알림
+
+저장소 시크릿 `SLACK_WEBHOOK_URL`에 Slack 수신 웹훅(Incoming Webhook) 주소를 넣으면 알림이 와요.
+시크릿이 없으면 알림만 건너뛰고 수집은 그대로 돌아요.
+
+```bash
+gh secret set SLACK_WEBHOOK_URL --repo dongdong-119/tzero-data
+```
+
+매시간 보내면 소음이라 아래 경우에만 보내요.
+
+- **알릴 만한 변경이 있을 때**: 새 발사, 상태 변경(예: Go → Success), 확정된 일정의 발사 시각 변경.
+  시각은 한국 시간으로 적어요. 미정(`tbd`) 일정의 임시 날짜 이동이나 이미지 변경 같은 건 알리지 않아요.
+- **실패했을 때**: 수집·배포 실패, 또는 LL2 호출이 전부 실패한 경우.
+- **수동 실행했을 때**: 변경이 없어도 결과를 보내요. 연결 테스트로 쓸 수 있어요.
+
+알림 기준은 `app/report.py`, 보내는 조건은 워크플로우의 `notify` 작업에 있어요.
 
 ## 실패했을 때
 

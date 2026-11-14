@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.parser import parse_launch, to_record  # noqa: E402
 from app.publish import PUBLIC_FIELDS, build_views, write_views  # noqa: E402
+from app.report import summarize  # noqa: E402
 from app.store import Archive  # noqa: E402
 
 NOW = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
@@ -136,6 +137,66 @@ class SweepTest(TempArchive):
 
         stuck = a.find_stuck(cap=2, now=NOW + timedelta(hours=100))
         self.assertEqual([r["launch_id"] for r in stuck], ["x", "y"])
+
+
+class ReportTest(TempArchive):
+    """Slack 알림용 변경 요약."""
+
+    def run_changes(self, first, second):
+        a = self.archive()
+        a.upsert(first)
+        a.save()
+        b = self.archive()  # 다음 실행
+        b.upsert(second)
+        return b.changes()
+
+    def test_no_changes_means_no_message(self):
+        same = [launch("a", "2026-11-15T03:21:00Z")]
+        self.assertEqual(self.run_changes(same, same), [])
+        self.assertIsNone(summarize([]))
+
+    def test_status_time_and_new_launch(self):
+        changes = self.run_changes(
+            [launch("a", "2026-11-15T03:21:00Z", name="Falcon 9 | A"),
+             launch("b", "2026-11-16T00:00:00Z", name="Electron | B")],
+            [launch("a", "2026-11-15T03:21:00Z", name="Falcon 9 | A", status="Success"),
+             launch("b", "2026-11-17T15:30:00Z", name="Electron | B"),
+             launch("c", "2026-11-20T00:00:00Z", name="Vulcan | C <test>", tbdtime=True)],
+        )
+        self.assertEqual(summarize(changes).splitlines(), [
+            "새 발사 1건 · 변경 2건",
+            "• Falcon 9 | A: Go for Launch → Success",
+            "• Electron | B: 11/16 09:00 KST → 11/18 00:30 KST",  # UTC+9
+            "• 🆕 Vulcan | C &lt;test&gt; — 11/20",                # 날짜만 확정
+        ])
+
+    def test_placeholder_shuffles_and_minor_fields_are_ignored(self):
+        before = [launch("a", "2026-12-31T00:00:00Z", tbddate=True, tbdtime=True),
+                  launch("b", "2026-11-16T00:00:00Z")]
+        moved = ll2_item("b", "2026-11-16T00:00:00Z")
+        moved["image"] = "https://example.com/new.jpg"
+        after = [launch("a", "2027-03-31T00:00:00Z", tbddate=True, tbdtime=True),
+                 parse_launch(moved)]
+        changes = self.run_changes(before, after)
+        self.assertEqual(len(changes), 2)       # 아카이브에는 둘 다 반영되지만
+        self.assertIsNone(summarize(changes))   # 알릴 만한 변경은 아님
+
+    def test_same_launch_in_two_feeds_is_compared_once(self):
+        a = self.archive()
+        a.upsert([launch("a", "2026-11-15T03:21:00Z")])
+        a.save()
+        b = self.archive()
+        b.upsert([launch("a", "2026-11-15T03:21:00Z", status="In Flight")])  # upcoming 피드
+        b.upsert([launch("a", "2026-11-15T03:21:00Z", status="Success")])    # previous 피드
+        self.assertEqual(summarize(b.changes()).splitlines()[1],
+                         "• Falcon 9 Block 5 | Starlink Group 1-1: Go for Launch → Success")
+
+    def test_long_list_is_capped(self):
+        many = [launch(f"id{i:02d}", "2026-11-15T03:21:00Z", name=f"R | M{i}") for i in range(14)]
+        lines = summarize(self.run_changes([], many)).splitlines()
+        self.assertEqual(lines[0], "새 발사 14건")
+        self.assertEqual(len(lines), 12)  # 제목 + 10줄 + "…외 4건"
+        self.assertEqual(lines[-1], "…외 4건")
 
 
 class BackfillTest(unittest.TestCase):

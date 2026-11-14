@@ -13,6 +13,7 @@ upcoming에서 빠져야 할 건만 정리해서 다시 쓴다.
 """
 import argparse
 import os
+import uuid
 from datetime import datetime, timezone
 
 from app.config import PREVIOUS_FETCH_LIMIT, PROVIDER_LSP_IDS, STUCK_SWEEP_CAP, TERMINAL_STATUSES
@@ -25,6 +26,7 @@ from app.ll2 import (
     fetch_upcoming,
 )
 from app.publish import build_views, write_views
+from app.report import summarize
 from app.store import Archive
 
 FAILED = object()  # LL2Calls.call()의 실패 표시 (fetch_by_id의 정상 None=404와 구분)
@@ -147,10 +149,20 @@ def main() -> None:
         f" · LL2 호출 성공 {ll2.ok} / 실패 {ll2.failed}"
     )
 
-    # GitHub Actions: LL2가 전부 실패했는지 워크플로우에 알린다 (ll2-health 잡이 사용)
+    summary = summarize(archive.changes())
+    print(f"── 알릴 변경 ──\n{summary}" if summary else "알릴 변경 없음")
+
+    # GitHub Actions: 워크플로우의 ll2-health · notify 잡이 쓰는 값들
     if os.environ.get("GITHUB_OUTPUT"):
+        text = summary or (
+            f"변경 없음 · 보관 {len(archive.records)}건"
+            f" · 예정 {len(views['upcoming.json'])}건"
+        )
+        delim = f"EOF_{uuid.uuid4().hex}"  # 여러 줄 출력용 구분자 (본문과 안 겹치게 임의 값)
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
             f.write(f"ll2_ok={'true' if ll2.ok > 0 else 'false'}\n")
+            f.write(f"notify={'true' if summary else 'false'}\n")
+            f.write(f"slack_text<<{delim}\n{text}\n{delim}\n")
     elif ll2.ok == 0:
         print("LL2 호출이 전부 실패했어요 — 기존 데이터는 유지됩니다.")
 

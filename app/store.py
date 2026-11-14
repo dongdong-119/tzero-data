@@ -9,7 +9,7 @@ MongoDB 컬렉션을 대신하는 파일 2개:
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 from app.config import ARCHIVE_PATH, STUCK_AFTER_HOURS, SWEEP_PATH, TERMINAL_STATUSES
 from app.models import ParsedLaunch
@@ -45,6 +45,8 @@ class Archive:
         self.sweep_path = sweep_path
         self.records: dict[str, dict] = _read_json(archive_path)
         self.missing_since: dict[str, str] = _read_json(sweep_path)
+        # 이번 실행에서 건드린 레코드의 실행 전 모습 (없던 건은 None) — changes()용
+        self._before: dict[str, Optional[dict]] = {}
 
     def save(self) -> None:
         """launch_id 순으로 정렬해 저장 — 레코드 위치가 고정돼 diff가 최소화된다."""
@@ -56,12 +58,25 @@ class Archive:
         saved, updated = 0, 0
         for l in launches:
             rec = to_record(l)
-            if rec["launch_id"] in self.records:
+            launch_id = rec["launch_id"]
+            self._before.setdefault(launch_id, self.records.get(launch_id))
+            if launch_id in self.records:
                 updated += 1
             else:
                 saved += 1
-            self.records[rec["launch_id"]] = rec
+            self.records[launch_id] = rec
         return {"saved": saved, "updated": updated}
+
+    def changes(self) -> list[tuple[Optional[dict], dict]]:
+        """이번 실행에서 새로 생겼거나 내용이 바뀐 레코드의 (이전, 현재) 쌍.
+
+        같은 발사가 여러 피드에서 거듭 저장돼도 실행 전 모습과 한 번만 비교한다.
+        """
+        return [
+            (before, self.records[launch_id])
+            for launch_id, before in self._before.items()
+            if before != self.records[launch_id]
+        ]
 
     def mark_seen(self, seen: set[str], now: datetime) -> None:
         """이번 실행의 피드에 잡힌 launch_id 집합으로 '사라진 건' 장부를 갱신.
