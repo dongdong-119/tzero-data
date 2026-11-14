@@ -1,0 +1,102 @@
+name: Ingest & publish
+
+on:
+  schedule:
+    - cron: "7 * * * *" # 매시 7분. GitHub 사정으로 수 분~수십 분 늦게 돌 수 있음
+  workflow_dispatch:
+    inputs:
+      backfill_from:
+        description: "과거 발사 백필 시작일 (YYYY-MM-DD). 비우면 일반 수집만"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths-ignore:
+      - "data/**"
+      - "state/**"
+      - "**.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # data/ · state/ 커밋
+    outputs:
+      changed: ${{ steps.commit.outputs.changed }}
+      ll2_ok: ${{ steps.ingest.outputs.ll2_ok }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: true # 아래 git push에 필요
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Test
+        run: python -m unittest discover -s tests
+
+      - name: Ingest
+        id: ingest
+        env:
+          BACKFILL_FROM: ${{ inputs.backfill_from }}
+        run: |
+          if [ -n "$BACKFILL_FROM" ]; then
+            python ingest.py --backfill-from "$BACKFILL_FROM"
+          else
+            python ingest.py
+          fi
+
+      - name: Commit data
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data state
+          if git diff --cached --quiet; then
+            echo "변경 없음 — 커밋·배포 생략"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "data: $(date -u +'%Y-%m-%d %H:%M') UTC"
+            git push || { git pull --rebase && git push; }
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 예약 실행은 데이터가 바뀐 경우에만, 수동 실행·코드 push는 항상 배포
+      - name: Upload Pages artifact
+        if: steps.commit.outputs.changed == 'true' || github.event_name != 'schedule'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: data
+
+  deploy:
+    needs: ingest
+    if: needs.ingest.outputs.changed == 'true' || github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
+
+  # LL2 호출이 한 건도 성공하지 못한 실행을 빨간불로 표시 (데이터는 그대로 유지됨)
+  ll2-health:
+    needs: ingest
+    if: needs.ingest.outputs.ll2_ok == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::error::LL2 호출이 전부 실패했어요 (레이트리밋 또는 장애). 기존 데이터는 유지돼요."
+          exit 1
